@@ -1,0 +1,1050 @@
+---
+title: "Workers-comp"
+author: "Zian Wang"
+date: "2026-02-22"
+output: html_document
+---
+```{r}
+# Library packages
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(DescTools)
+library(evd)
+library(car)
+library(extRemes)
+library(evir)
+```
+```{r}
+# Import data
+freq <- read_excel("srcsc-2026-claims-workers-comp.xlsx", sheet = 1)
+sev <- read_excel("srcsc-2026-claims-workers-comp.xlsx", sheet = 2)
+macro <- read_excel("srcsc-2026-interest-and-inflation.xlsx", skip = 2)
+```
+```{r}
+# Frequency
+summary(freq)
+```
+```{r}
+# Absolute value
+freq <- freq %>%
+  mutate(across(where(is.numeric), abs))
+summary(freq)
+```
+# NA
+```{r}
+# Total NA
+sum(rowSums(is.na(freq)) > 0)
+mean(rowSums(is.na(freq)) > 0)
+```
+```{r}
+# Variabel NA
+colMeans(is.na(freq))
+```
+```{r}
+colSums(is.na(freq))
+```
+```{r}
+# Remove NA
+freq <- na.omit(freq)
+```
+# Character Variables
+```{r}
+# solar_system
+freq$solar_system <- sub("_.*", "", freq$solar_system)
+table(freq$solar_system)
+```
+```{r}
+# station_id
+freq$station_id <- sub("_.*", "", freq$station_id)
+table(freq$station_id)
+```
+```{r}
+# occupation
+freq$occupation <- sub("_.*", "", freq$occupation)
+table(freq$occupation)
+```
+```{r}
+# employment_type
+freq$employment_type <- sub("_.*", "", freq$employment_type)
+table(freq$employment_type)
+```
+```{r}
+# Numeric Variables
+freqc <- subset(freq, experience_yrs >= 0.2 & experience_yrs <= 40)
+freqc <- freqc[freqc$accident_history_flag %in% c(0,1), ]
+freqc <- freqc[freqc$psych_stress_index %in% c(1,2,3,4,5), ]
+freqc <- freqc[freqc$hours_per_week %in% c(20,25,30,35,40), ]
+freqc <- subset(freqc, supervision_level >= 0 & supervision_level <= 1)
+freqc <- subset(freqc, gravity_level >= 0.75 & gravity_level <= 1.5)
+freqc <- freqc[freqc$safety_training_index %in% c(1,2,3,4,5), ]
+freqc <- freqc[freqc$protective_gear_quality %in% c(1,2,3,4,5), ]
+freqc <- subset(freqc, base_salary >= 20000 & base_salary <= 130000)
+freqc <- subset(freqc, exposure >= 0 & exposure <= 1)
+freqc <- subset(freqc, claim_count >= 0 & claim_count <= 2)
+
+freqc <- freqc %>%
+  mutate(across(c(accident_history_flag, psych_stress_index, hours_per_week,
+                  safety_training_index, protective_gear_quality), as.factor))
+
+summary(freqc)
+```
+```{r}
+# Average frequency
+sum(freqc$claim_count)/sum(freqc$exposure)
+```
+# Solar System
+```{r}
+# Group
+freqs <- freqc %>%
+  group_by(solar_system) %>%
+  summarise(
+    total_claims = sum(claim_count, na.rm = TRUE),
+    total_exposure = sum(exposure, na.rm = TRUE)
+  ) %>%
+  # Calculate average frequency
+  mutate(frequency = total_claims / total_exposure)
+
+# Order
+freqs$solar_system <- factor(freqs$solar_system,
+                             levels = freqs$solar_system[order(freqs$frequency, decreasing = TRUE)])
+
+# Plot
+ggplot(freqs, aes(x = solar_system, y = frequency)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = round(frequency, 4)),
+            vjust = -0.5) +
+  theme_minimal() +
+  labs(title = "Average Claim Frequency by Solar System",
+       x = "Solar System",
+       y = "Average Claim Frequency (Claims per Unit Exposure)")
+```
+# Occupation
+```{r}
+# Group
+freqo <- freqc %>%
+  group_by(occupation) %>%
+  summarise(
+    total_claims = sum(claim_count, na.rm = TRUE),
+    total_exposure = sum(exposure, na.rm = TRUE)
+  ) %>%
+  # Calculate average frequency
+  mutate(frequency = total_claims / total_exposure)
+
+# Order
+freqo$occupation <- factor(freqo$occupation,
+                             levels = freqo$occupation[order(freqo$frequency, decreasing = TRUE)])
+
+# Plot
+ggplot(freqo, aes(x = occupation, y = frequency)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = round(frequency, 4)),
+            vjust = -0.5) +
+  theme_minimal() +
+  labs(title = "Average Claim Frequency by Occupation",
+       x = "Occupation",
+       y = "Average Claim Frequency (Claims per Unit Exposure)")
+```
+```{r}
+# Distribution
+ggplot(freqc, aes(x = claim_count)) +
+  geom_bar(fill = "steelblue") +
+  geom_text(
+    stat = "count",
+    aes(label = after_stat(count)),
+    vjust = -0.3
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Claim Count Distribution",
+    x = "Number of Claims",
+    y = "Number of Policies"
+  )
+```
+```{r}
+# Mean and Variance
+mean(freqc$claim_count)
+var(freqc$claim_count)
+```
+# Modeling: Poisson
+```{r}
+# Full model
+freq_pois <- glm(claim_count ~ solar_system + station_id + occupation + employment_type + experience_yrs + accident_history_flag + psych_stress_index + hours_per_week + supervision_level + gravity_level + safety_training_index + protective_gear_quality + base_salary + offset(log(exposure)),
+                  family = poisson(),
+                  data = freqc)
+summary(freq_pois)
+```
+```{r}
+deviance(freq_pois) / df.residual(freq_pois)
+```
+```{r}
+# Selection
+freq_pois_i1 <- glm(claim_count ~ occupation + accident_history_flag + psych_stress_index + safety_training_index + offset(log(exposure)),
+                  family = poisson(),
+                  data = freqc)
+summary(freq_pois_i1)
+```
+```{r}
+plot(freq_pois_i1)
+```
+
+
+```{r}
+deviance(freq_pois_i1) / df.residual(freq_pois_i1)
+```
+```{r}
+# Predict
+freqc$predicted_freq <- predict(freq_pois_i1, type = "response")
+mean(freqc$predicted_freq)
+mean(freqc$claim_count)
+```
+```{r}
+# Plot
+plot(freqc$predicted_freq, freqc$claim_count)
+```
+```{r}
+# Gini
+Gini(freqc$predicted_freq, freqc$claim_count)
+```
+```{r}
+# Predict
+lambda <- sum(freqc$predicted_freq)
+lambda
+```
+```{r}
+# Severity
+summary(sev)
+```
+```{r}
+# Absolute Value
+sev <- sev %>%
+  mutate(across(where(is.numeric), abs))
+summary(sev)
+```
+# NA
+```{r}
+# Total NA
+sum(rowSums(is.na(sev)) > 0)
+mean(rowSums(is.na(sev)) > 0)
+```
+```{r}
+# Variable NA
+colMeans(is.na(sev))
+```
+```{r}
+colSums(is.na(sev))
+```
+```{r}
+lapply(sev, function(x) which(is.na(x)))
+```
+```{r}
+# claim_id
+sev[c(447, 448, 449, 1795, 1796, 1797, 1904, 1905, 1906),]
+```
+```{r}
+# policy_id
+sev[c(1593, 1594, 1595),]
+```
+```{r}
+# Fill
+sev[448, "claim_id"] <- "C-0000448"
+sev[1796, "claim_id"] <- "C-0001796"
+sev[1905, "claim_id"] <- "C-0001905"
+sev[1594, "policy_id"] <- "WC-EPS-00960"
+
+colSums(is.na(sev))
+```
+```{r}
+# Remove NA
+sev <- na.omit(sev)
+```
+# Character Variables
+```{r}
+# solar_system
+table(sev$solar_system)
+```
+```{r}
+# station_id
+sev$station_id <- sub("_.*", "", sev$station_id)
+table(sev$station_id)
+```
+```{r}
+# occupation
+sev$occupation <- sub("_.*", "", sev$occupation)
+table(sev$occupation)
+```
+```{r}
+# employment_type
+sev$employment_type <- sub("_.*", "", sev$employment_type)
+table(sev$employment_type)
+```
+```{r}
+# injury_type
+sev$injury_type <- sub("_.*", "", sev$injury_type)
+table(sev$injury_type)
+```
+```{r}
+# injury_cause
+sev$injury_cause <- sub("_.*", "", sev$injury_cause)
+table(sev$injury_cause)
+```
+```{r}
+# Numeric Variables
+sevc <- subset(sev, claim_seq >= 1 & claim_seq <= 2)
+sevc <- subset(sevc, experience_yrs >= 0.2 & experience_yrs <= 40)
+sevc <- sevc[sevc$accident_history_flag %in% c(0,1), ]
+sevc <- sevc[sevc$psych_stress_index %in% c(1,2,3,4,5), ]
+sevc <- sevc[sevc$hours_per_week %in% c(20,25,30,35,40), ]
+sevc <- subset(sevc, supervision_level >= 0 & supervision_level <= 1)
+sevc <- subset(sevc, gravity_level >= 0.75 & gravity_level <= 1.5)
+sevc <- sevc[sevc$safety_training_index %in% c(1,2,3,4,5), ]
+sevc <- sevc[sevc$protective_gear_quality %in% c(1,2,3,4,5), ]
+sevc <- subset(sevc, base_salary >= 20000 & base_salary <= 130000)
+sevc <- subset(sevc, exposure >= 0 & exposure <= 1)
+sevc <- subset(sevc, claim_length >= 3 & claim_length <= 1000)
+sevc <- subset(sevc, claim_amount >= 5)
+
+sevc <- sevc %>%
+  mutate(across(c(claim_seq, accident_history_flag, psych_stress_index, hours_per_week, safety_training_index, protective_gear_quality), as.factor))
+
+summary(sevc)
+```
+# Solar System
+```{r}
+# Group
+sevs <- sevc %>%
+  group_by(solar_system) %>%
+  summarise(
+    severity = mean(claim_amount, na.rm = TRUE))
+
+# Order
+sevs$solar_system <- factor(sevs$solar_system,
+                             levels = sevs$solar_system[order(sevs$severity, decreasing = TRUE)])
+
+# Plot
+ggplot(sevs, aes(x = solar_system, y = severity)) +
+  geom_col(fill = "darkorange") +
+  theme_minimal() +
+  labs(
+    title = "Average Claim Severity by Solar System",
+    x = "Solar System",
+    y = "Average Severity (Claim Amount per Claim)"
+  )
+```
+# Occupation
+```{r}
+# Group
+sevo <- sevc %>%
+  group_by(occupation) %>%
+  summarise(
+    severity = mean(claim_amount, na.rm = TRUE))
+
+# Order
+sevo$occupation <- factor(sevo$occupation,
+                             levels = sevo$occupation[order(sevo$severity, decreasing = TRUE)])
+# Plot
+ggplot(sevo, aes(x = occupation, y = severity)) +
+  geom_col(fill = "darkorange") +
+  theme_minimal() +
+  labs(
+    title = "Average Claim Severity by Occupation",
+    x = "Occupation",
+    y = "Average Severity (Claim Amount per Claim)"
+  )
+```
+# Injury Type
+```{r}
+# Group
+sev_it <- sevc %>%
+  group_by(injury_type) %>%
+  summarise(
+    severity = mean(claim_amount, na.rm = TRUE))
+
+# Order
+sev_it$injury_type <- factor(sev_it$injury_type,
+                             levels = sev_it$injury_type[order(sev_it$severity, decreasing = TRUE)])
+# Plot
+ggplot(sev_it, aes(x = injury_type, y = severity)) +
+  geom_col(fill = "darkorange") +
+  theme_minimal() +
+  labs(
+    title = "Average Claim Severity by Injury Type",
+    x = "Injury Type",
+    y = "Average Severity (Claim Amount per Claim)"
+  )
+```
+# Injury Cause
+```{r}
+# Group
+sev_ic <- sevc %>%
+  group_by(injury_cause) %>%
+  summarise(
+    severity = mean(claim_amount, na.rm = TRUE))
+
+# Order
+sev_ic$injury_cause <- factor(sev_ic$injury_cause,
+                             levels = sev_ic$injury_cause[order(sev_ic$severity, decreasing = TRUE)])
+# Plot
+ggplot(sev_ic, aes(x = injury_cause, y = severity)) +
+  geom_col(fill = "darkorange") +
+  theme_minimal() +
+  labs(
+    title = "Average Claim Severity by Injury Cause",
+    x = "Injury Cause",
+    y = "Average Severity (Claim Amount per Claim)"
+  )
+```
+```{r}
+# Occupation / Injury type
+tab <- table(sevc$occupation, sevc$injury_type)
+
+df_tab <- as.data.frame(tab)
+names(df_tab) <- c("Occupation", "Injury", "Count")
+
+ggplot(df_tab, aes(x = Occupation, y = Injury, fill = Count)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Occupation vs Injury Type Heatmap")
+```
+```{r}
+# Claim length / Claim amount
+ggplot(sev, aes(x = claim_length, y = claim_amount)) +
+  geom_point(color = "blue") +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +  
+  labs(title = "Base Salary vs Claim Amount")
+```
+```{r}
+# Claim length
+ggplot(sevc, aes(x = claim_length)) +
+  geom_histogram(bins = 50) +
+  theme_minimal() +
+  labs(
+    title = "Claim Length Distribution",
+    x = "Claim Length",
+    y = "Count"
+  )
+```
+```{r}
+# Distribution
+ggplot(sevc, aes(x = log(claim_amount))) +
+  geom_histogram(bins = 50) +
+  theme_minimal() +
+  labs(
+    title = "Log Claim Amount Distribution",
+    x = "Log(Claim Amount)",
+    y = "Count"
+  )
+```
+```{r}
+# Mean and Variance
+mean(sevc$claim_amount)
+var(sevc$claim_amount)
+```
+# Modeling: Gamma
+```{r}
+# Full model
+sev_gamma <- glm(claim_amount ~ solar_system + station_id + occupation + employment_type + experience_yrs + accident_history_flag + psych_stress_index + hours_per_week + supervision_level + gravity_level + safety_training_index + protective_gear_quality + base_salary + injury_type +
+injury_cause + claim_length,
+                  family = Gamma(link = "log"),
+                  data = sevc)
+summary(sev_gamma)
+```
+```{r}
+# Selection
+sev_gamma_i1 <- glm(claim_amount ~ psych_stress_index + safety_training_index + protective_gear_quality + base_salary + injury_cause + claim_length,
+                  family = Gamma(link = "log"),
+                  data = sevc)
+summary(sev_gamma_i1)
+```
+```{r}
+plot(sev_gamma_i1)
+```
+```{r}
+summary(sev_gamma_i1)$dispersion
+```
+```{r}
+pred_gamma <- predict(sev_gamma_i1, type = "response")
+MAE_gamma  <- mean(abs(sevc$claim_amount - pred_gamma))
+MAE_gamma
+RMSE_gamma <- sqrt(mean((sevc$claim_amount - pred_gamma)^2))
+RMSE_gamma
+```
+```{r}
+plot(sevc$claim_amount, pred_gamma)
+abline(0,1,col="red")
+```
+```{r}
+# Selection v2
+sev_gamma_i2 <- glm(claim_amount ~ solar_system + station_id + occupation + employment_type + experience_yrs + accident_history_flag + psych_stress_index + hours_per_week + supervision_level + gravity_level + safety_training_index + protective_gear_quality + base_salary,
+                  family = Gamma(link = "log"),
+                  data = sevc)
+summary(sev_gamma_i2)
+```
+```{r}
+plot(sev_gamma_i2)
+```
+```{r}
+# Selection v3
+sev_gamma_i3 <- glm(claim_amount ~ solar_system + station_id + employment_type  + psych_stress_index + supervision_level + gravity_level + safety_training_index + base_salary,
+                  family = Gamma(link = "log"),
+                  data = sevc)
+summary(sev_gamma_i3)
+```
+```{r}
+plot(sev_gamma_i3)
+```
+```{r}
+# Plot mean excess
+meplot(sevc$claim_amount)
+```
+```{r}
+# 1. Calculte expected value
+sevc$expected_val <- predict(sev_gamma_i3, type = "response")
+
+# 2. calculate Pearson residual：(Actual - Expected) / Expected
+sevc$pearson_res <- (sevc$claim_amount - sevc$expected_val) / sevc$expected_val
+
+# 3. Plot mean excess
+meplot(sevc$pearson_res, main = "Mean Excess Plot of Pearson Residuals")
+
+# 4. Examine residuals
+quantile(sevc$pearson_res, c(0.9, 0.95, 0.99))
+```
+```{r}
+# 1. Set residual threshold
+res_u <- 2
+extreme_res <- sevc$pearson_res[sevc$pearson_res > res_u]
+
+# 2. Fit GPD to residuals
+fit_res_gpd <- fevd(extreme_res, threshold = res_u, type = "GP")
+sigma_res <- fit_res_gpd$results$par[[1]]
+xi_res <- fit_res_gpd$results$par[[2]]
+
+# 3. Calculate the probability of residual beyond threshold
+p_tail_res <- length(extreme_res) / nrow(sevc)
+p_tail_res
+```
+```{r}
+plot(fit_res_gpd)
+```
+```{r}
+# Parameters
+phi <- summary(sev_gamma_i3)$dispersion
+exposure <- nrow(freqc)
+freqc$base_sev <- predict(sev_gamma_i3, newdata = freqc, type = "response")
+base_sev <- sum(freqc$base_sev * freqc$exposure) / sum(freqc$exposure)
+```
+# Short term
+```{r}
+# Original aggregate loss
+exposure*mean(sevc$claim_amount)*sum(freqc$claim_count)/sum(freqc$exposure)
+```
+```{r}
+# Simulate short term loss function
+simulate_loss <- function(lambda, base_sev, n_sim = 10000) {
+  results <- replicate(n_sim, {
+    # 1. Simulate annually claim counts (Poisson)
+    n_claims <- rpois(1, lambda)
+    
+    if (n_claims == 0) return(agg_loss = 0)
+    
+    # 2. Simulate severity for every claim
+    individual_claims <- sapply(1:n_claims, function(x) {
+      base_val <- rgamma(1, shape = 1/phi, scale = phi * base_sev)
+      
+      if (runif(1) < p_tail_res) {
+        extra_res <- revd(1, loc = res_u, scale = sigma_res, shape = xi_res, type = "GP")
+        return(base_val * (1 + max(extra_res, res_u)))
+      } else {
+        return(base_val)
+      }
+    })
+    
+    # 3. Calculate the aggregate loss
+    return(sum(individual_claims))
+  })
+}
+```
+```{r}
+# Simulate
+set.seed(2175)
+ST_losses <- simulate_loss(lambda, base_sev, n_sim = 100000)
+```
+```{r}
+# Total loss
+ST_loss_mean <- mean(ST_losses)
+ST_loss_sd <- sd(ST_losses)
+ST_loss_var <- var(ST_losses)
+ST_loss_var95 <- quantile(ST_losses, 0.95)
+ST_loss_var99 <- quantile(ST_losses, 0.99)
+ST_loss_tvar99 <- mean(ST_losses[ST_losses > quantile(ST_losses, 0.99)])
+
+ST_loss <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    ST_loss_mean,
+    ST_loss_sd,
+    ST_loss_var,
+    ST_loss_var95,
+    ST_loss_var99,
+    ST_loss_tvar99
+    )
+)
+
+print(ST_loss)
+```
+```{r}
+# Average loss
+ST_loss_avg_mean <- mean(ST_losses)/exposure
+ST_loss_avg_sd <- sd(ST_losses)/sqrt(exposure)
+ST_loss_avg_var <- var(ST_losses)/exposure
+ST_loss_avg_var95 <- quantile(ST_losses, 0.95)/exposure
+ST_loss_avg_var99 <- quantile(ST_losses, 0.99)/exposure
+ST_loss_avg_tvar99 <- mean(ST_losses[ST_losses > quantile(ST_losses, 0.99)])/exposure
+
+ST_loss_avg <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    ST_loss_avg_mean,
+    ST_loss_avg_sd,
+    ST_loss_avg_var,
+    ST_loss_avg_var95,
+    ST_loss_avg_var99,
+    ST_loss_avg_tvar99
+    )
+)
+
+print(ST_loss_avg)
+```
+# Returns
+```{r}
+# Total premium
+risk_load_percent <- 0.1
+risk_load <- (ST_loss_var95 - ST_loss_mean) * risk_load_percent
+expense_load <- ST_loss_mean * 0.20
+profit_margin <- 0.05
+total_premium <- (ST_loss_mean + risk_load + expense_load) / (1 - profit_margin)
+total_premium <- as.numeric(total_premium)
+round(total_premium, 2)
+```
+```{r}
+# Average premium
+avg_premium <- total_premium/exposure
+round(avg_premium, 2)
+```
+```{r}
+# Pure Premium
+# Calculate GPD Tail Factor
+# E[GPD_excess] = sigma / (1 - xi)
+expected_excess_res <- sigma_res / (1 - xi_res)
+tail_adjustment <- (1 - p_tail_res) + p_tail_res * (1 + res_u + expected_excess_res)
+
+# Individual expected loss
+freqc$expected_loss <- freqc$predicted_freq * freqc$base_sev * tail_adjustment
+
+# Gross Premium
+loading <- 0.20
+freqc$premium <- freqc$expected_loss / (1 - loading)
+
+# Rate Card
+rate_card <- aggregate(premium ~ solar_system + occupation, 
+                       data = freqc, 
+                       FUN = mean)
+
+# Format
+rate_card$premium <- round(rate_card$premium, 2)
+print(rate_card)
+```
+```{r}
+# Average premium of solar systems
+sys_premium <- aggregate(premium ~ solar_system, 
+                       data = freqc, 
+                       FUN = mean)
+sys_premium
+```
+```{r}
+# Average premium of occupations
+occ_premium <- aggregate(premium ~ occupation, 
+                       data = freqc, 
+                       FUN = mean)
+occ_premium
+```
+```{r}
+# Distribution
+ggplot(freqc, aes(x = premium)) +
+  geom_histogram(bins = 50) +
+  theme_minimal() +
+  labs(
+    title = "Premium Distribution",
+    x = "Premium",
+    y = "Count"
+  )
+```
+# Net Revenue
+```{r}
+# Total revenue
+ST_revenue <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    total_premium - ST_loss_mean,
+    ST_loss_sd,
+    ST_loss_var,
+    total_premium - ST_loss_var95,
+    total_premium - ST_loss_var99,
+    total_premium - ST_loss_tvar99
+    )
+)
+
+print(ST_revenue)
+```
+```{r}
+# Average revenue
+ST_revenue_avg <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    avg_premium - ST_loss_avg_mean,
+    ST_loss_avg_sd,
+    ST_loss_avg_var,
+    avg_premium - ST_loss_avg_var95,
+    avg_premium - ST_loss_avg_var99,
+    avg_premium - ST_loss_avg_tvar99
+    )
+)
+
+print(ST_revenue_avg)
+```
+# Interest and inflation
+```{r}
+# Mean
+base_inflation <- mean(macro$Inflation)
+base_interest1 <- mean(macro$"1-Year Risk Free Annual Spot Rate")
+base_interest10 <- mean(macro$"10-Year Risk Free Annual Spot Rate")
+
+# SD
+sd_inflation <- sd(macro$Inflation)
+sd_interest1 <- sd(macro$"1-Year Risk Free Annual Spot Rate")
+sd_interest10 <- sd(macro$"10-Year Risk Free Annual Spot Rate")
+```
+# Long term
+```{r}
+# Simulate long term function
+simulate_long_term_path <- function(lambda, base_sev, base_premium, n_years = 10, n_sim_long = 1000) {
+  results <- replicate(n_sim_long, {
+    total_pv_cost <- 0
+    total_pv_premium <- 0
+    
+    for (t in 1:n_years) {
+      # 1. Simulate total annual loss
+      annual_loss <- sum(simulate_loss(lambda, base_sev, n_sim = 1))
+      
+      # 2. Interest and inflation (normally distributed)
+      annual_inflation <- rnorm(1, mean = base_inflation, sd = sd_inflation)
+      annual_interest <- rnorm(1, mean = base_interest1, sd = sd_interest1)
+      
+      # 3. Calculate PV
+      pv_factor <- (1 + annual_inflation)^t / (1 + base_interest1)^t
+      total_pv_cost <- total_pv_cost + (annual_loss * pv_factor)
+      total_pv_premium <- total_pv_premium + (base_premium * pv_factor)
+    }
+    
+    return(c(pv_cost = total_pv_cost, pv_premium = total_pv_premium))
+  })
+  
+  return(as.data.frame(t(results)))
+}
+```
+```{r}
+# Simulate
+set.seed(2175)
+LT <- simulate_long_term_path(lambda, base_sev, total_premium, n_years = 10, n_sim_long = 10000)
+```
+```{r}
+# Loss
+LT_loss_mean <- mean(LT$pv_cost)
+LT_loss_sd <- sd(LT$pv_cost)
+LT_loss_var <- var(LT$pv_cost)
+LT_loss_var95 <- quantile(LT$pv_cost, 0.95)
+LT_loss_var99 <- quantile(LT$pv_cost, 0.99)
+LT_loss_tvar99 <- mean(LT$pv_cost[LT$pv_cost > quantile(LT$pv_cost, 0.99)])
+
+LT_loss <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    LT_loss_mean,
+    LT_loss_sd,
+    LT_loss_var,
+    LT_loss_var95,
+    LT_loss_var99,
+    LT_loss_tvar99
+    )
+)
+
+print(LT_loss)
+```
+```{r}
+# Returns
+LT_premium_mean <- mean(LT$pv_premium)
+LT_premium_sd <- sd(LT$pv_premium)
+LT_premium_var <- var(LT$pv_premium)
+LT_premium_var95 <- quantile(LT$pv_premium, 0.05)
+LT_premium_var99 <- quantile(LT$pv_premium, 0.01)
+LT_premium_tvar99 <- mean(LT$pv_premium[LT$pv_premium < quantile(LT$pv_premium, 0.01)])
+
+LT_premium <- data.frame(
+  Metric = c("Expected Total Returns (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    LT_premium_mean,
+    LT_premium_sd,
+    LT_premium_var,
+    LT_premium_var95,
+    LT_premium_var99,
+    LT_premium_tvar99
+    )
+)
+
+print(LT_premium)
+```
+```{r}
+# Net Revenue
+LT_revenue <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    LT_premium_mean - LT_loss_mean,
+    sd(LT$pv_premium - LT$pv_cost),
+    var(LT$pv_premium - LT$pv_cost),
+    LT_premium_var95 - LT_loss_var95,
+    LT_premium_var99 - LT_loss_var99,
+    LT_premium_tvar99 - LT_loss_tvar99
+    )
+)
+
+print(LT_revenue)
+```
+# Scenario testing
+# Best scenario
+```{r}
+# Simulate short term loss: best scenario
+set.seed(2175)
+ST_losses_b <- simulate_loss(lambda*0.9, base_sev*0.95, n_sim = 100000)
+```
+```{r}
+# Total loss: best scenario
+ST_loss_b_mean <- mean(ST_losses_b)
+ST_loss_b_sd <- sd(ST_losses_b)
+ST_loss_b_var <- var(ST_losses_b)
+ST_loss_b_var95 <- quantile(ST_losses_b, 0.95)
+ST_loss_b_var99 <- quantile(ST_losses_b, 0.99)
+ST_loss_b_tvar99 <- mean(ST_losses_b[ST_losses_b > quantile(ST_losses_b, 0.99)])
+
+ST_loss_b <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    ST_loss_b_mean,
+    ST_loss_b_sd,
+    ST_loss_b_var,
+    ST_loss_b_var95,
+    ST_loss_b_var99,
+    ST_loss_b_tvar99
+    )
+)
+
+print(ST_loss_b)
+```
+```{r}
+# Total revenue: best scenario
+ST_revenue_b <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    total_premium - ST_loss_b_mean,
+    ST_loss_b_sd,
+    ST_loss_b_var,
+    total_premium - ST_loss_b_var95,
+    total_premium - ST_loss_b_var99,
+    total_premium - ST_loss_b_tvar99
+    )
+)
+
+print(ST_revenue_b)
+```
+# Worst scenario
+```{r}
+# Simulate short term loss: worst scenario
+set.seed(2175)
+ST_losses_w <- simulate_loss(lambda*1.2, base_sev*1.3, n_sim = 100000)
+```
+```{r}
+# Total loss: worst scenario
+ST_loss_w_mean <- mean(ST_losses_w)
+ST_loss_w_sd <- sd(ST_losses_w)
+ST_loss_w_var <- var(ST_losses_w)
+ST_loss_w_var95 <- quantile(ST_losses_w, 0.95)
+ST_loss_w_var99 <- quantile(ST_losses_w, 0.99)
+ST_loss_w_tvar99 <- mean(ST_losses_w[ST_losses_w > quantile(ST_losses_w, 0.99)])
+
+ST_loss_w <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    ST_loss_w_mean,
+    ST_loss_w_sd,
+    ST_loss_w_var,
+    ST_loss_w_var95,
+    ST_loss_w_var99,
+    ST_loss_w_tvar99
+    )
+)
+
+print(ST_loss_w)
+```
+```{r}
+# Total revenue: worst scenario
+ST_revenue_w <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    total_premium - ST_loss_w_mean,
+    ST_loss_w_sd,
+    ST_loss_w_var,
+    total_premium - ST_loss_w_var95,
+    total_premium - ST_loss_w_var99,
+    total_premium - ST_loss_w_tvar99
+    )
+)
+
+print(ST_revenue_w)
+```
+# Stress testing
+# Extreme frequency
+```{r}
+# Simulate short term loss: extreme frequency
+set.seed(2175)
+ST_losses_f <- simulate_loss(lambda*1.5, base_sev, n_sim = 100000)
+```
+```{r}
+# Total loss: extreme frequency
+ST_loss_f_mean <- mean(ST_losses_f)
+ST_loss_f_sd <- sd(ST_losses_f)
+ST_loss_f_var <- var(ST_losses_f)
+ST_loss_f_var95 <- quantile(ST_losses_f, 0.95)
+ST_loss_f_var99 <- quantile(ST_losses_f, 0.99)
+ST_loss_f_tvar99 <- mean(ST_losses_f[ST_losses_f > quantile(ST_losses_f, 0.99)])
+
+ST_loss_f <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    ST_loss_f_mean,
+    ST_loss_f_sd,
+    ST_loss_f_var,
+    ST_loss_f_var95,
+    ST_loss_f_var99,
+    ST_loss_f_tvar99
+    )
+)
+
+print(ST_loss_f)
+```
+```{r}
+# Total revenue: extreme frequency
+ST_revenue_f <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    total_premium - ST_loss_f_mean,
+    ST_loss_f_sd,
+    ST_loss_f_var,
+    total_premium - ST_loss_f_var95,
+    total_premium - ST_loss_f_var99,
+    total_premium - ST_loss_f_tvar99
+    )
+)
+
+print(ST_revenue_f)
+```
+# Extreme severity
+```{r}
+# Simulate short term loss: extreme severity
+set.seed(2175)
+ST_losses_s <- simulate_loss(lambda, base_sev*1.8, n_sim = 100000)
+```
+```{r}
+# Total loss: extreme severity
+ST_loss_s_mean <- mean(ST_losses_s)
+ST_loss_s_sd <- sd(ST_losses_s)
+ST_loss_s_var <- var(ST_losses_s)
+ST_loss_s_var95 <- quantile(ST_losses_s, 0.95)
+ST_loss_s_var99 <- quantile(ST_losses_s, 0.99)
+ST_loss_s_tvar99 <- mean(ST_losses_s[ST_losses_s > quantile(ST_losses_s, 0.99)])
+
+ST_loss_s <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    ST_loss_s_mean,
+    ST_loss_s_sd,
+    ST_loss_s_var,
+    ST_loss_s_var95,
+    ST_loss_s_var99,
+    ST_loss_s_tvar99
+    )
+)
+
+print(ST_loss_s)
+```
+```{r}
+# Total revenue: extreme severity
+ST_revenue_s <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    total_premium - ST_loss_s_mean,
+    ST_loss_s_sd,
+    ST_loss_s_var,
+    total_premium - ST_loss_s_var95,
+    total_premium - ST_loss_s_var99,
+    total_premium - ST_loss_s_tvar99
+    )
+)
+
+print(ST_revenue_s)
+```
+# Catastrophe
+```{r}
+# Simulate short term loss: catastrophe
+set.seed(2175)
+ST_losses_c <- simulate_loss(lambda*1.5, base_sev*1.8, n_sim = 100000)
+```
+```{r}
+# Total loss: catastrophe
+ST_loss_c_mean <- mean(ST_losses_c)
+ST_loss_c_sd <- sd(ST_losses_c)
+ST_loss_c_var <- var(ST_losses_c)
+ST_loss_c_var95 <- quantile(ST_losses_c, 0.95)
+ST_loss_c_var99 <- quantile(ST_losses_c, 0.99)
+ST_loss_c_tvar99 <- mean(ST_losses_c[ST_losses_c > quantile(ST_losses_c, 0.99)])
+
+ST_loss_c <- data.frame(
+  Metric = c("Expected Total Loss (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    ST_loss_c_mean,
+    ST_loss_c_sd,
+    ST_loss_c_var,
+    ST_loss_c_var95,
+    ST_loss_c_var99,
+    ST_loss_c_tvar99
+    )
+)
+
+print(ST_loss_c)
+```
+```{r}
+# Total revenue: extreme frequency
+ST_revenue_c <- data.frame(
+  Metric = c("Expected Total Revenue (Mean)", "Standard Deviation", "Variance", "95% VaR", "99% VaR", "99% TVaR"),
+  Value = c(
+    total_premium - ST_loss_c_mean,
+    ST_loss_c_sd,
+    ST_loss_c_var,
+    total_premium - ST_loss_c_var95,
+    total_premium - ST_loss_c_var99,
+    total_premium - ST_loss_c_tvar99
+    )
+)
+
+print(ST_revenue_c)
+```
+
