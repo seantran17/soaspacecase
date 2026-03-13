@@ -317,7 +317,7 @@ base <- base * prem_loading
 base
 mean(clms_cargo_sev$claim_amount)
 
-# Base premium = $196421.3
+# Base premium = $196421.30
 
 # Relativities
 cargo_type_high <- exp(mean(c(sev_glm$coefficients["cargo_typegold"],
@@ -333,10 +333,6 @@ mean_cargo_value <- exp(mean(clms_cargo_sev$cargo_value) *
                             sev_glm$coefficients["cargo_value"])
 mean_cargo_value_round <- 1.25
 safety_discount <- 0.9
-
-# Salaries and Administrative Costs --------------------------
-total_salary <- 260573000
-total_admin <- 10000000000
 
 # Interest Rates -----------------------------------------------------
 rates <- read_xlsx("C:/Users/stsse/OneDrive/Documents/UNSW/ACTL5100/SOA_2026_Case_Study_Materials/SOA_2026_Case_Study_Materials/srcsc-2026-interest-and-inflation.xlsx")
@@ -362,7 +358,7 @@ var_1_spot <- mean(rates$annual_spot)
 
 # Aggregate Modelling ---------------------------------------------
 # Monte Carlo
-MC <- 5000
+MC <- 10000
 years <- 10
 
 total_claims_1yr <- numeric(MC)
@@ -419,7 +415,6 @@ pv_admin  <- numeric(years)
 new_policy_sev$n_claims_0 <- new_policy_sev$claim_count
 
 # Precompute parameters
-lambda_hat <- predict(freq_model, type = "response")
 theta_hat <- freq_model$theta
 
 phi <- summary(sev_glm)$dispersion
@@ -435,7 +430,11 @@ inflations <- rnorm(years, mean = mu_inf, sd = sqrt(var_inf))
 spots <- rnorm(years, mean = mu_1_spot, sd = sqrt(var_1_spot))
   
 for(t in 1:years) {
+# Change pilot experience
+new_policy_sev$pilot_experience <- clms_cargo_freq$pilot_experience + t
+
 # Claim Frequencies
+lambda_hat <- predict(freq_model, newdata = new_policy_sev, type = "response")
 n_claims_t <- rnbinom(124752, size = theta_hat, mu = lambda_hat)
 new_policy_sev[[paste0("n_claims_", t)]] <- n_claims_t
 
@@ -445,6 +444,7 @@ claim_amount_t <- numeric(nrow(new_policy_sev))
 claim_indices <- which(n_claims_t > 0)
 
 all_claims <- rgamma(sum(n_claims_t[claim_indices]), shape = 1/phi, scale = mu_all[rep(claim_indices, n_claims_t[claim_indices])] * phi)
+all_claims <- pmin(all_claims, 22500000)
 
 claim_sums <- rowsum(all_claims, rep(claim_indices, n_claims_t[claim_indices]))
 
@@ -475,20 +475,17 @@ cum_discount <- prod(1 + spots[1:t])
 pv_claims[t] <- claims_yearly[t] / cum_discount
 pv_premium[t] <- premium_yearly[t] / cum_discount
 
-pv_salary[t] <- total_salary * cum_inflation / cum_discount
-pv_admin[t]  <- total_admin * cum_inflation / cum_discount
-
 }
 
 # Save 1-year aggregates (first year only)
 total_claims_1yr[mc] <- pv_claims[1]
 total_premium_1yr[mc] <- pv_premium[1]
-net_revenue_1yr[mc] <- pv_premium[1] - pv_claims[1] - pv_salary[1] - pv_admin[1]
+net_revenue_1yr[mc] <- (1.1 / 1.2) * pv_premium[1] - pv_claims[1]
 
 # Save 10-year aggregates (sum of 10 years)
 total_claims_10yr[mc] <- sum(pv_claims)
 total_premium_10yr[mc] <- sum(pv_premium)
-net_revenue_10yr[mc] <- sum(pv_premium) - sum(pv_claims) - sum(pv_salary) - sum(pv_admin)
+net_revenue_10yr[mc] <- (1.1 / 1.2) * sum(pv_premium) - sum(pv_claims)
 }
 
 results <- data.frame(
@@ -615,3 +612,1071 @@ rownames(long_term_table) <- c(
 
 short_term_table
 long_term_table
+
+library(openxlsx)
+write.xlsx(results, "monte_carlo.xlsx")
+write.xlsx(short_term_table, "short_term.xlsx")
+write.xlsx(long_term_table, "long_term.xlsx")
+
+# Stress Tests --------------------------------------------
+# Route Risk --------------------------
+MC <- 100
+years <- 10
+
+total_claims_1yr <- numeric(MC)
+total_premium_1yr <- numeric(MC)
+net_revenue_1yr <- numeric(MC)
+
+total_claims_10yr <- numeric(MC)
+total_premium_10yr <- numeric(MC)
+net_revenue_10yr <- numeric(MC)
+
+# Dataframe Setup and Transformation
+new_policy_sev_route <- clms_cargo_freq
+
+# Change exposure to 1 (because we are assuming all policyholders
+# in historical data will remain for the entire duration of 10 years)
+new_policy_sev_route$exposure <- 1
+
+# Precompute base premium multiplier for each policy
+# Static Multiplier
+new_policy_sev_route$static_mult <- 1
+
+new_policy_sev_route$static_mult[new_policy_sev_route$cargo_type %in% c("gold","platinum")] <- 
+  new_policy_sev_route$static_mult[new_policy_sev_route$cargo_type %in% c("gold","platinum")] *
+  cargo_type_high_round
+
+new_policy_sev_route$static_mult[new_policy_sev_route$route_risk %in% c(4,5)] <- 
+  new_policy_sev_route$static_mult[new_policy_sev_route$route_risk %in% c(4,5)] * 
+  route_risk_high_round
+
+new_policy_sev_route$static_mult[new_policy_sev_route$weight > 75000] <- 
+  new_policy_sev_route$static_mult[new_policy_sev_route$weight > 75000] *
+  median_weight_round
+
+new_policy_sev_route$static_mult[new_policy_sev_route$cargo_value > 90000000] <- 
+  new_policy_sev_route$static_mult[new_policy_sev_route$cargo_value > 90000000] *
+  mean_cargo_value_round
+
+# Dynamic Multiplier
+new_policy_sev_route$dyn_mult <- 1
+
+# Add yearly columns
+new_policy_sev_route[, paste0("n_claims_", 1:years)] <- 0
+new_policy_sev_route[, paste0("claim_amount_", 1:years)] <- 0
+new_policy_sev_route[, paste0("premium", 1:years)] <- 0
+
+claims_yearly <- numeric(years)
+premium_yearly <- numeric(years)
+pv_claims <- numeric(years)
+pv_premium <- numeric(years)
+pv_salary <- numeric(years)
+pv_admin  <- numeric(years)
+
+# Rename claim count
+new_policy_sev_route$n_claims_0 <- new_policy_sev_route$claim_count
+
+# Precompute parameters
+theta_hat <- freq_model$theta
+
+phi <- summary(sev_glm)$dispersion
+mu_all <- predict(sev_glm, newdata = new_policy_sev_route, type = "response")
+
+# Set all Route Risk to Max
+
+new_policy_sev_route$route_risk <- factor(5)
+
+
+# Simulation
+set.seed(5100)
+
+for(mc in 1:MC) {
+  
+  # Generate annual inflation & spot rates for this MC
+  inflations <- rnorm(years, mean = mu_inf, sd = sqrt(var_inf))
+  spots <- rnorm(years, mean = mu_1_spot, sd = sqrt(var_1_spot))
+  
+  for(t in 1:years) {
+    # Change pilot experience
+    new_policy_sev_route$pilot_experience <- clms_cargo_freq$pilot_experience + t
+    
+    # Claim Frequencies
+    lambda_hat <- predict(freq_model, newdata = new_policy_sev_route, type = "response")
+    n_claims_t <- rnbinom(124752, size = theta_hat, mu = lambda_hat)
+    new_policy_sev_route[[paste0("n_claims_", t)]] <- n_claims_t
+    
+    # Claim Severities
+    claim_amount_t <- numeric(nrow(new_policy_sev_route))
+    
+    claim_indices <- which(n_claims_t > 0)
+    
+    all_claims <- rgamma(sum(n_claims_t[claim_indices]), shape = 1/phi, scale = mu_all[rep(claim_indices, n_claims_t[claim_indices])] * phi)
+    all_claims <- pmin(all_claims, 22500000)
+    
+    claim_sums <- rowsum(all_claims, rep(claim_indices, n_claims_t[claim_indices]))
+    
+    claim_amount_t[claim_indices] <- as.numeric(claim_sums)
+    
+    new_policy_sev_route[[paste0("claim_amount_", t)]] <- claim_amount_t
+    
+    # Premiums
+    premium_t <- base * new_policy_sev_route$static_mult  # only static multipliers
+    
+    # Apply dynamic safety discount based on previous year
+    prev_claims <- if(t == 1) new_policy_sev_route$n_claims_0 else new_policy_sev_route[[paste0("n_claims_", t-1)]]
+    premium_t[prev_claims == 0] <- premium_t[prev_claims == 0] * safety_discount
+    new_policy_sev_route[[paste0("premium", t)]] <- premium_t
+    
+    # Aggregate sums
+    claims_yearly[t] <- sum(claim_amount_t)
+    
+    premium_yearly[t] <- sum(premium_t)
+    
+    # Apply inflation
+    cum_inflation <- prod(1 + inflations[1:t])
+    claims_yearly[t] <- claims_yearly[t] * cum_inflation
+    premium_yearly[t] <- premium_yearly[t] * cum_inflation
+    
+    # Apply discount
+    cum_discount <- prod(1 + spots[1:t])
+    pv_claims[t] <- claims_yearly[t] / cum_discount
+    pv_premium[t] <- premium_yearly[t] / cum_discount
+    
+  }
+  
+  # Save 1-year aggregates (first year only)
+  total_claims_1yr[mc] <- pv_claims[1]
+  total_premium_1yr[mc] <- pv_premium[1]
+  net_revenue_1yr[mc] <- (1.1 / 1.2) * pv_premium[1] - pv_claims[1]
+  
+  # Save 10-year aggregates (sum of 10 years)
+  total_claims_10yr[mc] <- sum(pv_claims)
+  total_premium_10yr[mc] <- sum(pv_premium)
+  net_revenue_10yr[mc] <- (1.1 / 1.2) * sum(pv_premium) - sum(pv_claims)
+}
+
+results_route <- data.frame(
+  total_claims_1yr,
+  total_premium_1yr,
+  net_revenue_1yr,
+  total_claims_10yr,
+  total_premium_10yr,
+  net_revenue_10yr
+)
+
+# Short-Term (1Y)
+# Claims
+exp_claims_s <- mean(results_route$total_claims_1yr)
+var_claims_s <- var(results_route$total_claims_1yr)
+
+VaR_95_claims_s <- quantile(results_route$total_claims_1yr, probs = alpha_95)
+TVaR_95_claims_s <- mean(results_route$total_claims_1yr[results_route$total_claims_1yr > VaR_95_claims_s])
+
+VaR_99_claims_s <- quantile(results_route$total_claims_1yr, probs = alpha_99)
+TVaR_99_claims_s <- mean(results_route$total_claims_1yr[results_route$total_claims_1yr > VaR_99_claims_s])
+
+# Premium
+exp_prem_s <- mean(results_route$total_premium_1yr)
+var_prem_s <- var(results_route$total_premium_1yr)
+
+VaR_95_prem_s <- quantile(results_route$total_premium_1yr, probs = 1 - alpha_95)
+TVaR_95_prem_s <- mean(results_route$total_premium_1yr[results_route$total_premium_1yr < VaR_95_prem_s])
+
+VaR_99_prem_s <- quantile(results_route$total_premium_1yr, probs = 1 - alpha_99)
+TVaR_99_prem_s <- mean(results_route$total_premium_1yr[results_route$total_premium_1yr < VaR_99_prem_s])
+
+# Net Revenue
+exp_rev_s <- mean(results_route$net_revenue_1yr)
+var_rev_s <- var(results_route$net_revenue_1yr)
+
+VaR_95_rev_s <- quantile(results_route$net_revenue_1yr, probs = 1 - alpha_95)
+TVaR_95_rev_s <- mean(results_route$net_revenue_1yr[results_route$net_revenue_1yr < VaR_95_rev_s])
+
+VaR_99_rev_s <- quantile(results_route$net_revenue_1yr, probs = 1 - alpha_99)
+TVaR_99_rev_s <- mean(results_route$net_revenue_1yr[results_route$net_revenue_1yr < VaR_99_rev_s])
+
+# Long-Term (10Y)
+# Claims
+exp_claims_l <- mean(results_route$total_claims_10yr)
+var_claims_l <- var(results_route$total_claims_10yr)
+
+VaR_95_claims_l <- quantile(results_route$total_claims_10yr, probs = alpha_95)
+TVaR_95_claims_l <- mean(results_route$total_claims_10yr[results_route$total_claims_10yr > VaR_95_claims_l])
+
+VaR_99_claims_l <- quantile(results_route$total_claims_10yr, probs = alpha_99)
+TVaR_99_claims_l <- mean(results_route$total_claims_10yr[results_route$total_claims_10yr > VaR_99_claims_l])
+
+# Premium
+exp_prem_l <- mean(results_route$total_premium_10yr)
+var_prem_l <- var(results_route$total_premium_10yr)
+
+VaR_95_prem_l <- quantile(results_route$total_premium_10yr, probs = 1 - alpha_95)
+TVaR_95_prem_l <- mean(results_route$total_premium_10yr[results_route$total_premium_10yr < VaR_95_prem_l])
+
+VaR_99_prem_l <- quantile(results_route$total_premium_10yr, probs = 1 - alpha_99)
+TVaR_99_prem_l <- mean(results_route$total_premium_10yr[results_route$total_premium_10yr < VaR_99_prem_l])
+
+# Net Revenue
+exp_rev_l <- mean(results_route$net_revenue_10yr)
+var_rev_l <- var(results_route$net_revenue_10yr)
+
+VaR_95_rev_l <- quantile(results_route$net_revenue_10yr, probs = 1 - alpha_95)
+TVaR_95_rev_l <- mean(results_route$net_revenue_10yr[results_route$net_revenue_10yr < VaR_95_rev_l])
+
+VaR_99_rev_l <- quantile(results_route$net_revenue_10yr, probs = 1 - alpha_99)
+TVaR_99_rev_l <- mean(results_route$net_revenue_10yr[results_route$net_revenue_10yr < VaR_99_rev_l])
+
+# Table Format
+short_term_table_route <- data.frame(
+  Claims = c(exp_claims_s, var_claims_s,
+             VaR_95_claims_s, TVaR_95_claims_s,
+             VaR_99_claims_s, TVaR_99_claims_s),
+  
+  Premium = c(exp_prem_s, var_prem_s,
+              VaR_95_prem_s, TVaR_95_prem_s,
+              VaR_99_prem_s, TVaR_99_prem_s),
+  
+  Net_Revenue = c(exp_rev_s, var_rev_s,
+                  VaR_95_rev_s, TVaR_95_rev_s,
+                  VaR_99_rev_s, TVaR_99_rev_s)
+)
+
+rownames(short_term_table_route) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+long_term_table_route <- data.frame(
+  Claims = c(exp_claims_l, var_claims_l,
+             VaR_95_claims_l, TVaR_95_claims_l,
+             VaR_99_claims_l, TVaR_99_claims_l),
+  
+  Premium = c(exp_prem_l, var_prem_l,
+              VaR_95_prem_l, TVaR_95_prem_l,
+              VaR_99_prem_l, TVaR_99_prem_l),
+  
+  Net_Revenue = c(exp_rev_l, var_rev_l,
+                  VaR_95_rev_l, TVaR_95_rev_l,
+                  VaR_99_rev_l, TVaR_99_rev_l)
+)
+
+rownames(long_term_table_route) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+short_term_table_route
+long_term_table_route
+
+write.xlsx(results_route, "monte_carlo_route.xlsx")
+write.xlsx(short_term_table_route, "short_term_route.xlsx")
+write.xlsx(long_term_table_route, "long_term_route.xlsx")
+# Solar Radiation ------------------------
+MC <- 100
+years <- 10
+
+total_claims_1yr <- numeric(MC)
+total_premium_1yr <- numeric(MC)
+net_revenue_1yr <- numeric(MC)
+
+total_claims_10yr <- numeric(MC)
+total_premium_10yr <- numeric(MC)
+net_revenue_10yr <- numeric(MC)
+
+# Dataframe Setup and Transformation
+new_policy_sev_solar <- clms_cargo_freq
+
+# Change exposure to 1 (because we are assuming all policyholders
+# in historical data will remain for the entire duration of 10 years)
+new_policy_sev_solar$exposure <- 1
+
+# Precompute base premium multiplier for each policy
+# Static Multiplier
+new_policy_sev_solar$static_mult <- 1
+
+new_policy_sev_solar$static_mult[new_policy_sev_solar$cargo_type %in% c("gold","platinum")] <- 
+  new_policy_sev_solar$static_mult[new_policy_sev_solar$cargo_type %in% c("gold","platinum")] *
+  cargo_type_high_round
+
+new_policy_sev_solar$static_mult[new_policy_sev_solar$route_risk %in% c(4,5)] <- 
+  new_policy_sev_solar$static_mult[new_policy_sev_solar$route_risk %in% c(4,5)] * 
+  route_risk_high_round
+
+new_policy_sev_solar$static_mult[new_policy_sev_solar$weight > 75000] <- 
+  new_policy_sev_solar$static_mult[new_policy_sev_solar$weight > 75000] *
+  median_weight_round
+
+new_policy_sev_solar$static_mult[new_policy_sev_solar$cargo_value > 90000000] <- 
+  new_policy_sev_solar$static_mult[new_policy_sev_solar$cargo_value > 90000000] *
+  mean_cargo_value_round
+
+# Dynamic Multiplier
+new_policy_sev_solar$dyn_mult <- 1
+
+# Add yearly columns
+new_policy_sev_solar[, paste0("n_claims_", 1:years)] <- 0
+new_policy_sev_solar[, paste0("claim_amount_", 1:years)] <- 0
+new_policy_sev_solar[, paste0("premium", 1:years)] <- 0
+
+claims_yearly <- numeric(years)
+premium_yearly <- numeric(years)
+pv_claims <- numeric(years)
+pv_premium <- numeric(years)
+pv_salary <- numeric(years)
+pv_admin  <- numeric(years)
+
+# Rename claim count
+new_policy_sev_solar$n_claims_0 <- new_policy_sev_solar$claim_count
+
+# Precompute parameters
+theta_hat <- freq_model$theta
+
+phi <- summary(sev_glm)$dispersion
+mu_all <- predict(sev_glm, newdata = new_policy_sev_solar, type = "response")
+
+# Set all Solar Radiation to Max
+new_policy_sev_solar$solar_radiation <- 1
+
+# Simulation
+set.seed(5100)
+
+for(mc in 1:MC) {
+  
+  # Generate annual inflation & spot rates for this MC
+  inflations <- rnorm(years, mean = mu_inf, sd = sqrt(var_inf))
+  spots <- rnorm(years, mean = mu_1_spot, sd = sqrt(var_1_spot))
+  
+  for(t in 1:years) {
+    # Change pilot experience
+    new_policy_sev_solar$pilot_experience <- clms_cargo_freq$pilot_experience + t
+    
+    # Claim Frequencies
+    lambda_hat <- predict(freq_model, newdata = new_policy_sev_solar, type = "response")
+    n_claims_t <- rnbinom(124752, size = theta_hat, mu = lambda_hat)
+    new_policy_sev_solar[[paste0("n_claims_", t)]] <- n_claims_t
+    
+    # Claim Severities
+    claim_amount_t <- numeric(nrow(new_policy_sev_solar))
+    
+    claim_indices <- which(n_claims_t > 0)
+    
+    all_claims <- rgamma(sum(n_claims_t[claim_indices]), shape = 1/phi, scale = mu_all[rep(claim_indices, n_claims_t[claim_indices])] * phi)
+    all_claims <- pmin(all_claims, 22500000)
+    
+    claim_sums <- rowsum(all_claims, rep(claim_indices, n_claims_t[claim_indices]))
+    
+    claim_amount_t[claim_indices] <- as.numeric(claim_sums)
+    
+    new_policy_sev_solar[[paste0("claim_amount_", t)]] <- claim_amount_t
+    
+    # Premiums
+    premium_t <- base * new_policy_sev_solar$static_mult  # only static multipliers
+    
+    # Apply dynamic safety discount based on previous year
+    prev_claims <- if(t == 1) new_policy_sev_solar$n_claims_0 else new_policy_sev_solar[[paste0("n_claims_", t-1)]]
+    premium_t[prev_claims == 0] <- premium_t[prev_claims == 0] * safety_discount
+    new_policy_sev_solar[[paste0("premium", t)]] <- premium_t
+    
+    # Aggregate sums
+    claims_yearly[t] <- sum(claim_amount_t)
+    
+    premium_yearly[t] <- sum(premium_t)
+    
+    # Apply inflation
+    cum_inflation <- prod(1 + inflations[1:t])
+    claims_yearly[t] <- claims_yearly[t] * cum_inflation
+    premium_yearly[t] <- premium_yearly[t] * cum_inflation
+    
+    # Apply discount
+    cum_discount <- prod(1 + spots[1:t])
+    pv_claims[t] <- claims_yearly[t] / cum_discount
+    pv_premium[t] <- premium_yearly[t] / cum_discount
+    
+  }
+  
+  # Save 1-year aggregates (first year only)
+  total_claims_1yr[mc] <- pv_claims[1]
+  total_premium_1yr[mc] <- pv_premium[1]
+  net_revenue_1yr[mc] <- (1.1 / 1.2) * pv_premium[1] - pv_claims[1]
+  
+  # Save 10-year aggregates (sum of 10 years)
+  total_claims_10yr[mc] <- sum(pv_claims)
+  total_premium_10yr[mc] <- sum(pv_premium)
+  net_revenue_10yr[mc] <- (1.1 / 1.2) * sum(pv_premium) - sum(pv_claims)
+}
+
+results_solar <- data.frame(
+  total_claims_1yr,
+  total_premium_1yr,
+  net_revenue_1yr,
+  total_claims_10yr,
+  total_premium_10yr,
+  net_revenue_10yr
+)
+
+# Short-Term (1Y)
+# Claims
+exp_claims_s <- mean(results_solar$total_claims_1yr)
+var_claims_s <- var(results_solar$total_claims_1yr)
+
+VaR_95_claims_s <- quantile(results_solar$total_claims_1yr, probs = alpha_95)
+TVaR_95_claims_s <- mean(results_solar$total_claims_1yr[results_solar$total_claims_1yr > VaR_95_claims_s])
+
+VaR_99_claims_s <- quantile(results_solar$total_claims_1yr, probs = alpha_99)
+TVaR_99_claims_s <- mean(results_solar$total_claims_1yr[results_solar$total_claims_1yr > VaR_99_claims_s])
+
+# Premium
+exp_prem_s <- mean(results_solar$total_premium_1yr)
+var_prem_s <- var(results_solar$total_premium_1yr)
+
+VaR_95_prem_s <- quantile(results_solar$total_premium_1yr, probs = 1 - alpha_95)
+TVaR_95_prem_s <- mean(results_solar$total_premium_1yr[results_solar$total_premium_1yr < VaR_95_prem_s])
+
+VaR_99_prem_s <- quantile(results_solar$total_premium_1yr, probs = 1 - alpha_99)
+TVaR_99_prem_s <- mean(results_solar$total_premium_1yr[results_solar$total_premium_1yr < VaR_99_prem_s])
+
+# Net Revenue
+exp_rev_s <- mean(results_solar$net_revenue_1yr)
+var_rev_s <- var(results_solar$net_revenue_1yr)
+
+VaR_95_rev_s <- quantile(results_solar$net_revenue_1yr, probs = 1 - alpha_95)
+TVaR_95_rev_s <- mean(results_solar$net_revenue_1yr[results_solar$net_revenue_1yr < VaR_95_rev_s])
+
+VaR_99_rev_s <- quantile(results_solar$net_revenue_1yr, probs = 1 - alpha_99)
+TVaR_99_rev_s <- mean(results_solar$net_revenue_1yr[results_solar$net_revenue_1yr < VaR_99_rev_s])
+
+# Long-Term (10Y)
+# Claims
+exp_claims_l <- mean(results_solar$total_claims_10yr)
+var_claims_l <- var(results_solar$total_claims_10yr)
+
+VaR_95_claims_l <- quantile(results_solar$total_claims_10yr, probs = alpha_95)
+TVaR_95_claims_l <- mean(results_solar$total_claims_10yr[results_solar$total_claims_10yr > VaR_95_claims_l])
+
+VaR_99_claims_l <- quantile(results_solar$total_claims_10yr, probs = alpha_99)
+TVaR_99_claims_l <- mean(results_solar$total_claims_10yr[results_solar$total_claims_10yr > VaR_99_claims_l])
+
+# Premium
+exp_prem_l <- mean(results_solar$total_premium_10yr)
+var_prem_l <- var(results_solar$total_premium_10yr)
+
+VaR_95_prem_l <- quantile(results_solar$total_premium_10yr, probs = 1 - alpha_95)
+TVaR_95_prem_l <- mean(results_solar$total_premium_10yr[results_solar$total_premium_10yr < VaR_95_prem_l])
+
+VaR_99_prem_l <- quantile(results_solar$total_premium_10yr, probs = 1 - alpha_99)
+TVaR_99_prem_l <- mean(results_solar$total_premium_10yr[results_solar$total_premium_10yr < VaR_99_prem_l])
+
+# Net Revenue
+exp_rev_l <- mean(results_solar$net_revenue_10yr)
+var_rev_l <- var(results_solar$net_revenue_10yr)
+
+VaR_95_rev_l <- quantile(results_solar$net_revenue_10yr, probs = 1 - alpha_95)
+TVaR_95_rev_l <- mean(results_solar$net_revenue_10yr[results_solar$net_revenue_10yr < VaR_95_rev_l])
+
+VaR_99_rev_l <- quantile(results_solar$net_revenue_10yr, probs = 1 - alpha_99)
+TVaR_99_rev_l <- mean(results_solar$net_revenue_10yr[results_solar$net_revenue_10yr < VaR_99_rev_l])
+
+# Table Format
+short_term_table_solar <- data.frame(
+  Claims = c(exp_claims_s, var_claims_s,
+             VaR_95_claims_s, TVaR_95_claims_s,
+             VaR_99_claims_s, TVaR_99_claims_s),
+  
+  Premium = c(exp_prem_s, var_prem_s,
+              VaR_95_prem_s, TVaR_95_prem_s,
+              VaR_99_prem_s, TVaR_99_prem_s),
+  
+  Net_Revenue = c(exp_rev_s, var_rev_s,
+                  VaR_95_rev_s, TVaR_95_rev_s,
+                  VaR_99_rev_s, TVaR_99_rev_s)
+)
+
+rownames(short_term_table_solar) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+long_term_table_solar <- data.frame(
+  Claims = c(exp_claims_l, var_claims_l,
+             VaR_95_claims_l, TVaR_95_claims_l,
+             VaR_99_claims_l, TVaR_99_claims_l),
+  
+  Premium = c(exp_prem_l, var_prem_l,
+              VaR_95_prem_l, TVaR_95_prem_l,
+              VaR_99_prem_l, TVaR_99_prem_l),
+  
+  Net_Revenue = c(exp_rev_l, var_rev_l,
+                  VaR_95_rev_l, TVaR_95_rev_l,
+                  VaR_99_rev_l, TVaR_99_rev_l)
+)
+
+rownames(long_term_table_solar) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+short_term_table_solar
+long_term_table_solar
+
+write.xlsx(results_solar, "monte_carlo_solar.xlsx")
+write.xlsx(short_term_table_solar, "short_term_solar.xlsx")
+write.xlsx(long_term_table_solar, "long_term_solar.xlsx")
+
+
+# Debris Density ---------------------------------
+MC <- 100
+years <- 10
+
+total_claims_1yr <- numeric(MC)
+total_premium_1yr <- numeric(MC)
+net_revenue_1yr <- numeric(MC)
+
+total_claims_10yr <- numeric(MC)
+total_premium_10yr <- numeric(MC)
+net_revenue_10yr <- numeric(MC)
+
+# Dataframe Setup and Transformation
+new_policy_sev_debris <- clms_cargo_freq
+
+# Change exposure to 1 (because we are assuming all policyholders
+# in historical data will remain for the entire duration of 10 years)
+new_policy_sev_debris$exposure <- 1
+
+# Precompute base premium multiplier for each policy
+# Static Multiplier
+new_policy_sev_debris$static_mult <- 1
+
+new_policy_sev_debris$static_mult[new_policy_sev_debris$cargo_type %in% c("gold","platinum")] <- 
+  new_policy_sev_debris$static_mult[new_policy_sev_debris$cargo_type %in% c("gold","platinum")] *
+  cargo_type_high_round
+
+new_policy_sev_debris$static_mult[new_policy_sev_debris$route_risk %in% c(4,5)] <- 
+  new_policy_sev_debris$static_mult[new_policy_sev_debris$route_risk %in% c(4,5)] * 
+  route_risk_high_round
+
+new_policy_sev_debris$static_mult[new_policy_sev_debris$weight > 75000] <- 
+  new_policy_sev_debris$static_mult[new_policy_sev_debris$weight > 75000] *
+  median_weight_round
+
+new_policy_sev_debris$static_mult[new_policy_sev_debris$cargo_value > 90000000] <- 
+  new_policy_sev_debris$static_mult[new_policy_sev_debris$cargo_value > 90000000] *
+  mean_cargo_value_round
+
+# Dynamic Multiplier
+new_policy_sev_debris$dyn_mult <- 1
+
+# Add yearly columns
+new_policy_sev_debris[, paste0("n_claims_", 1:years)] <- 0
+new_policy_sev_debris[, paste0("claim_amount_", 1:years)] <- 0
+new_policy_sev_debris[, paste0("premium", 1:years)] <- 0
+
+claims_yearly <- numeric(years)
+premium_yearly <- numeric(years)
+pv_claims <- numeric(years)
+pv_premium <- numeric(years)
+pv_salary <- numeric(years)
+pv_admin  <- numeric(years)
+
+# Rename claim count
+new_policy_sev_debris$n_claims_0 <- new_policy_sev_debris$claim_count
+
+# Precompute parameters
+theta_hat <- freq_model$theta
+
+phi <- summary(sev_glm)$dispersion
+mu_all <- predict(sev_glm, newdata = new_policy_sev_debris, type = "response")
+
+# Set all Solar Radiation to Max
+new_policy_sev_debris$debris_density <- 1
+
+# Simulation
+set.seed(5100)
+
+for(mc in 1:MC) {
+  
+  # Generate annual inflation & spot rates for this MC
+  inflations <- rnorm(years, mean = mu_inf, sd = sqrt(var_inf))
+  spots <- rnorm(years, mean = mu_1_spot, sd = sqrt(var_1_spot))
+  
+  for(t in 1:years) {
+    # Change pilot experience
+    new_policy_sev_debris$pilot_experience <- clms_cargo_freq$pilot_experience + t
+    
+    # Claim Frequencies
+    lambda_hat <- predict(freq_model, newdata = new_policy_sev_debris, type = "response")
+    n_claims_t <- rnbinom(124752, size = theta_hat, mu = lambda_hat)
+    new_policy_sev_debris[[paste0("n_claims_", t)]] <- n_claims_t
+    
+    # Claim Severities
+    claim_amount_t <- numeric(nrow(new_policy_sev_debris))
+    
+    claim_indices <- which(n_claims_t > 0)
+    
+    all_claims <- rgamma(sum(n_claims_t[claim_indices]), shape = 1/phi, scale = mu_all[rep(claim_indices, n_claims_t[claim_indices])] * phi)
+    all_claims <- pmin(all_claims, 22500000)
+    
+    claim_sums <- rowsum(all_claims, rep(claim_indices, n_claims_t[claim_indices]))
+    
+    claim_amount_t[claim_indices] <- as.numeric(claim_sums)
+    
+    new_policy_sev_debris[[paste0("claim_amount_", t)]] <- claim_amount_t
+    
+    # Premiums
+    premium_t <- base * new_policy_sev_debris$static_mult  # only static multipliers
+    
+    # Apply dynamic safety discount based on previous year
+    prev_claims <- if(t == 1) new_policy_sev_debris$n_claims_0 else new_policy_sev_debris[[paste0("n_claims_", t-1)]]
+    premium_t[prev_claims == 0] <- premium_t[prev_claims == 0] * safety_discount
+    new_policy_sev_debris[[paste0("premium", t)]] <- premium_t
+    
+    # Aggregate sums
+    claims_yearly[t] <- sum(claim_amount_t)
+    
+    premium_yearly[t] <- sum(premium_t)
+    
+    # Apply inflation
+    cum_inflation <- prod(1 + inflations[1:t])
+    claims_yearly[t] <- claims_yearly[t] * cum_inflation
+    premium_yearly[t] <- premium_yearly[t] * cum_inflation
+    
+    # Apply discount
+    cum_discount <- prod(1 + spots[1:t])
+    pv_claims[t] <- claims_yearly[t] / cum_discount
+    pv_premium[t] <- premium_yearly[t] / cum_discount
+    
+  }
+  
+  # Save 1-year aggregates (first year only)
+  total_claims_1yr[mc] <- pv_claims[1]
+  total_premium_1yr[mc] <- pv_premium[1]
+  net_revenue_1yr[mc] <- (1.1 / 1.2) * pv_premium[1] - pv_claims[1]
+  
+  # Save 10-year aggregates (sum of 10 years)
+  total_claims_10yr[mc] <- sum(pv_claims)
+  total_premium_10yr[mc] <- sum(pv_premium)
+  net_revenue_10yr[mc] <- (1.1 / 1.2) * sum(pv_premium) - sum(pv_claims)
+}
+
+results_debris <- data.frame(
+  total_claims_1yr,
+  total_premium_1yr,
+  net_revenue_1yr,
+  total_claims_10yr,
+  total_premium_10yr,
+  net_revenue_10yr
+)
+
+# Short-Term (1Y)
+# Claims
+exp_claims_s <- mean(results_debris$total_claims_1yr)
+var_claims_s <- var(results_debris$total_claims_1yr)
+
+VaR_95_claims_s <- quantile(results_debris$total_claims_1yr, probs = alpha_95)
+TVaR_95_claims_s <- mean(results_debris$total_claims_1yr[results_debris$total_claims_1yr > VaR_95_claims_s])
+
+VaR_99_claims_s <- quantile(results_debris$total_claims_1yr, probs = alpha_99)
+TVaR_99_claims_s <- mean(results_debris$total_claims_1yr[results_debris$total_claims_1yr > VaR_99_claims_s])
+
+# Premium
+exp_prem_s <- mean(results_debris$total_premium_1yr)
+var_prem_s <- var(results_debris$total_premium_1yr)
+
+VaR_95_prem_s <- quantile(results_debris$total_premium_1yr, probs = 1 - alpha_95)
+TVaR_95_prem_s <- mean(results_debris$total_premium_1yr[results_debris$total_premium_1yr < VaR_95_prem_s])
+
+VaR_99_prem_s <- quantile(results_debris$total_premium_1yr, probs = 1 - alpha_99)
+TVaR_99_prem_s <- mean(results_debris$total_premium_1yr[results_debris$total_premium_1yr < VaR_99_prem_s])
+
+# Net Revenue
+exp_rev_s <- mean(results_debris$net_revenue_1yr)
+var_rev_s <- var(results_debris$net_revenue_1yr)
+
+VaR_95_rev_s <- quantile(results_debris$net_revenue_1yr, probs = 1 - alpha_95)
+TVaR_95_rev_s <- mean(results_debris$net_revenue_1yr[results_debris$net_revenue_1yr < VaR_95_rev_s])
+
+VaR_99_rev_s <- quantile(results_debris$net_revenue_1yr, probs = 1 - alpha_99)
+TVaR_99_rev_s <- mean(results_debris$net_revenue_1yr[results_debris$net_revenue_1yr < VaR_99_rev_s])
+
+# Long-Term (10Y)
+# Claims
+exp_claims_l <- mean(results_debris$total_claims_10yr)
+var_claims_l <- var(results_debris$total_claims_10yr)
+
+VaR_95_claims_l <- quantile(results_debris$total_claims_10yr, probs = alpha_95)
+TVaR_95_claims_l <- mean(results_debris$total_claims_10yr[results_debris$total_claims_10yr > VaR_95_claims_l])
+
+VaR_99_claims_l <- quantile(results_debris$total_claims_10yr, probs = alpha_99)
+TVaR_99_claims_l <- mean(results_debris$total_claims_10yr[results_debris$total_claims_10yr > VaR_99_claims_l])
+
+# Premium
+exp_prem_l <- mean(results_debris$total_premium_10yr)
+var_prem_l <- var(results_debris$total_premium_10yr)
+
+VaR_95_prem_l <- quantile(results_debris$total_premium_10yr, probs = 1 - alpha_95)
+TVaR_95_prem_l <- mean(results_debris$total_premium_10yr[results_debris$total_premium_10yr < VaR_95_prem_l])
+
+VaR_99_prem_l <- quantile(results_debris$total_premium_10yr, probs = 1 - alpha_99)
+TVaR_99_prem_l <- mean(results_debris$total_premium_10yr[results_debris$total_premium_10yr < VaR_99_prem_l])
+
+# Net Revenue
+exp_rev_l <- mean(results_debris$net_revenue_10yr)
+var_rev_l <- var(results_debris$net_revenue_10yr)
+
+VaR_95_rev_l <- quantile(results_debris$net_revenue_10yr, probs = 1 - alpha_95)
+TVaR_95_rev_l <- mean(results_debris$net_revenue_10yr[results_debris$net_revenue_10yr < VaR_95_rev_l])
+
+VaR_99_rev_l <- quantile(results_debris$net_revenue_10yr, probs = 1 - alpha_99)
+TVaR_99_rev_l <- mean(results_debris$net_revenue_10yr[results_debris$net_revenue_10yr < VaR_99_rev_l])
+
+# Table Format
+short_term_table_debris <- data.frame(
+  Claims = c(exp_claims_s, var_claims_s,
+             VaR_95_claims_s, TVaR_95_claims_s,
+             VaR_99_claims_s, TVaR_99_claims_s),
+  
+  Premium = c(exp_prem_s, var_prem_s,
+              VaR_95_prem_s, TVaR_95_prem_s,
+              VaR_99_prem_s, TVaR_99_prem_s),
+  
+  Net_Revenue = c(exp_rev_s, var_rev_s,
+                  VaR_95_rev_s, TVaR_95_rev_s,
+                  VaR_99_rev_s, TVaR_99_rev_s)
+)
+
+rownames(short_term_table_debris) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+long_term_table_debris <- data.frame(
+  Claims = c(exp_claims_l, var_claims_l,
+             VaR_95_claims_l, TVaR_95_claims_l,
+             VaR_99_claims_l, TVaR_99_claims_l),
+  
+  Premium = c(exp_prem_l, var_prem_l,
+              VaR_95_prem_l, TVaR_95_prem_l,
+              VaR_99_prem_l, TVaR_99_prem_l),
+  
+  Net_Revenue = c(exp_rev_l, var_rev_l,
+                  VaR_95_rev_l, TVaR_95_rev_l,
+                  VaR_99_rev_l, TVaR_99_rev_l)
+)
+
+rownames(long_term_table_debris) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+short_term_table_debris
+long_term_table_debris
+
+write.xlsx(results_debris, "monte_carlo_debris.xlsx")
+write.xlsx(short_term_table_debris, "short_term_debris.xlsx")
+write.xlsx(long_term_table_debris, "long_term_debris.xlsx")
+
+
+# Catastrophe ----------------------------------------
+MC <- 100
+years <- 10
+
+total_claims_1yr <- numeric(MC)
+total_premium_1yr <- numeric(MC)
+net_revenue_1yr <- numeric(MC)
+
+total_claims_10yr <- numeric(MC)
+total_premium_10yr <- numeric(MC)
+net_revenue_10yr <- numeric(MC)
+
+# Dataframe Setup and Transformation
+new_policy_sev_cat <- clms_cargo_freq
+
+# Change exposure to 1 (because we are assuming all policyholders
+# in historical data will remain for the entire duration of 10 years)
+new_policy_sev_cat$exposure <- 1
+
+# Precompute base premium multiplier for each policy
+# Static Multiplier
+new_policy_sev_cat$static_mult <- 1
+
+new_policy_sev_cat$static_mult[new_policy_sev_cat$cargo_type %in% c("gold","platinum")] <- 
+  new_policy_sev_cat$static_mult[new_policy_sev_cat$cargo_type %in% c("gold","platinum")] *
+  cargo_type_high_round
+
+new_policy_sev_cat$static_mult[new_policy_sev_cat$route_risk %in% c(4,5)] <- 
+  new_policy_sev_cat$static_mult[new_policy_sev_cat$route_risk %in% c(4,5)] * 
+  route_risk_high_round
+
+new_policy_sev_cat$static_mult[new_policy_sev_cat$weight > 75000] <- 
+  new_policy_sev_cat$static_mult[new_policy_sev_cat$weight > 75000] *
+  median_weight_round
+
+new_policy_sev_cat$static_mult[new_policy_sev_cat$cargo_value > 90000000] <- 
+  new_policy_sev_cat$static_mult[new_policy_sev_cat$cargo_value > 90000000] *
+  mean_cargo_value_round
+
+# Dynamic Multiplier
+new_policy_sev_cat$dyn_mult <- 1
+
+# Add yearly columns
+new_policy_sev_cat[, paste0("n_claims_", 1:years)] <- 0
+new_policy_sev_cat[, paste0("claim_amount_", 1:years)] <- 0
+new_policy_sev_cat[, paste0("premium", 1:years)] <- 0
+
+claims_yearly <- numeric(years)
+premium_yearly <- numeric(years)
+pv_claims <- numeric(years)
+pv_premium <- numeric(years)
+pv_salary <- numeric(years)
+pv_admin  <- numeric(years)
+
+# Rename claim count
+new_policy_sev_cat$n_claims_0 <- new_policy_sev_cat$claim_count
+
+# Precompute parameters
+theta_hat <- freq_model$theta
+
+phi <- summary(sev_glm)$dispersion
+mu_all <- predict(sev_glm, newdata = new_policy_sev_cat, type = "response")
+
+# Set all Solar Radiation to Max
+new_policy_sev_cat$debris_density <- 1
+new_policy_sev_cat$solar_radiation <- 1
+new_policy_sev_cat$route_risk <- factor(5)
+
+# Simulation
+set.seed(5100)
+
+for(mc in 1:MC) {
+  
+  # Generate annual inflation & spot rates for this MC
+  inflations <- rnorm(years, mean = mu_inf, sd = sqrt(var_inf))
+  spots <- rnorm(years, mean = mu_1_spot, sd = sqrt(var_1_spot))
+  
+  for(t in 1:years) {
+    # Change pilot experience
+    new_policy_sev_cat$pilot_experience <- clms_cargo_freq$pilot_experience + t
+    
+    # Claim Frequencies
+    lambda_hat <- predict(freq_model, newdata = new_policy_sev_cat, type = "response")
+    n_claims_t <- rnbinom(124752, size = theta_hat, mu = lambda_hat)
+    new_policy_sev_cat[[paste0("n_claims_", t)]] <- n_claims_t
+    
+    # Claim Severities
+    claim_amount_t <- numeric(nrow(new_policy_sev_cat))
+    
+    claim_indices <- which(n_claims_t > 0)
+    
+    all_claims <- rgamma(sum(n_claims_t[claim_indices]), shape = 1/phi, scale = mu_all[rep(claim_indices, n_claims_t[claim_indices])] * phi)
+    all_claims <- pmin(all_claims, 22500000)
+    
+    claim_sums <- rowsum(all_claims, rep(claim_indices, n_claims_t[claim_indices]))
+    
+    claim_amount_t[claim_indices] <- as.numeric(claim_sums)
+    
+    new_policy_sev_cat[[paste0("claim_amount_", t)]] <- claim_amount_t
+    
+    # Premiums
+    premium_t <- base * new_policy_sev_cat$static_mult  # only static multipliers
+    
+    # Apply dynamic safety discount based on previous year
+    prev_claims <- if(t == 1) new_policy_sev_cat$n_claims_0 else new_policy_sev_cat[[paste0("n_claims_", t-1)]]
+    premium_t[prev_claims == 0] <- premium_t[prev_claims == 0] * safety_discount
+    new_policy_sev_cat[[paste0("premium", t)]] <- premium_t
+    
+    # Aggregate sums
+    claims_yearly[t] <- sum(claim_amount_t)
+    
+    premium_yearly[t] <- sum(premium_t)
+    
+    # Apply inflation
+    cum_inflation <- prod(1 + inflations[1:t])
+    claims_yearly[t] <- claims_yearly[t] * cum_inflation
+    premium_yearly[t] <- premium_yearly[t] * cum_inflation
+    
+    # Apply discount
+    cum_discount <- prod(1 + spots[1:t])
+    pv_claims[t] <- claims_yearly[t] / cum_discount
+    pv_premium[t] <- premium_yearly[t] / cum_discount
+    
+  }
+  
+  # Save 1-year aggregates (first year only)
+  total_claims_1yr[mc] <- pv_claims[1]
+  total_premium_1yr[mc] <- pv_premium[1]
+  net_revenue_1yr[mc] <- (1.1 / 1.2) * pv_premium[1] - pv_claims[1]
+  
+  # Save 10-year aggregates (sum of 10 years)
+  total_claims_10yr[mc] <- sum(pv_claims)
+  total_premium_10yr[mc] <- sum(pv_premium)
+  net_revenue_10yr[mc] <- (1.1 / 1.2) * sum(pv_premium) - sum(pv_claims)
+}
+
+results_cat <- data.frame(
+  total_claims_1yr,
+  total_premium_1yr,
+  net_revenue_1yr,
+  total_claims_10yr,
+  total_premium_10yr,
+  net_revenue_10yr
+)
+
+# Short-Term (1Y)
+# Claims
+exp_claims_s <- mean(results_cat$total_claims_1yr)
+var_claims_s <- var(results_cat$total_claims_1yr)
+
+VaR_95_claims_s <- quantile(results_cat$total_claims_1yr, probs = alpha_95)
+TVaR_95_claims_s <- mean(results_cat$total_claims_1yr[results_cat$total_claims_1yr > VaR_95_claims_s])
+
+VaR_99_claims_s <- quantile(results_cat$total_claims_1yr, probs = alpha_99)
+TVaR_99_claims_s <- mean(results_cat$total_claims_1yr[results_cat$total_claims_1yr > VaR_99_claims_s])
+
+# Premium
+exp_prem_s <- mean(results_cat$total_premium_1yr)
+var_prem_s <- var(results_cat$total_premium_1yr)
+
+VaR_95_prem_s <- quantile(results_cat$total_premium_1yr, probs = 1 - alpha_95)
+TVaR_95_prem_s <- mean(results_cat$total_premium_1yr[results_cat$total_premium_1yr < VaR_95_prem_s])
+
+VaR_99_prem_s <- quantile(results_cat$total_premium_1yr, probs = 1 - alpha_99)
+TVaR_99_prem_s <- mean(results_cat$total_premium_1yr[results_cat$total_premium_1yr < VaR_99_prem_s])
+
+# Net Revenue
+exp_rev_s <- mean(results_cat$net_revenue_1yr)
+var_rev_s <- var(results_cat$net_revenue_1yr)
+
+VaR_95_rev_s <- quantile(results_cat$net_revenue_1yr, probs = 1 - alpha_95)
+TVaR_95_rev_s <- mean(results_cat$net_revenue_1yr[results_cat$net_revenue_1yr < VaR_95_rev_s])
+
+VaR_99_rev_s <- quantile(results_cat$net_revenue_1yr, probs = 1 - alpha_99)
+TVaR_99_rev_s <- mean(results_cat$net_revenue_1yr[results_cat$net_revenue_1yr < VaR_99_rev_s])
+
+# Long-Term (10Y)
+# Claims
+exp_claims_l <- mean(results_cat$total_claims_10yr)
+var_claims_l <- var(results_cat$total_claims_10yr)
+
+VaR_95_claims_l <- quantile(results_cat$total_claims_10yr, probs = alpha_95)
+TVaR_95_claims_l <- mean(results_cat$total_claims_10yr[results_cat$total_claims_10yr > VaR_95_claims_l])
+
+VaR_99_claims_l <- quantile(results_cat$total_claims_10yr, probs = alpha_99)
+TVaR_99_claims_l <- mean(results_cat$total_claims_10yr[results_cat$total_claims_10yr > VaR_99_claims_l])
+
+# Premium
+exp_prem_l <- mean(results_cat$total_premium_10yr)
+var_prem_l <- var(results_cat$total_premium_10yr)
+
+VaR_95_prem_l <- quantile(results_cat$total_premium_10yr, probs = 1 - alpha_95)
+TVaR_95_prem_l <- mean(results_cat$total_premium_10yr[results_cat$total_premium_10yr < VaR_95_prem_l])
+
+VaR_99_prem_l <- quantile(results_cat$total_premium_10yr, probs = 1 - alpha_99)
+TVaR_99_prem_l <- mean(results_cat$total_premium_10yr[results_cat$total_premium_10yr < VaR_99_prem_l])
+
+# Net Revenue
+exp_rev_l <- mean(results_cat$net_revenue_10yr)
+var_rev_l <- var(results_cat$net_revenue_10yr)
+
+VaR_95_rev_l <- quantile(results_cat$net_revenue_10yr, probs = 1 - alpha_95)
+TVaR_95_rev_l <- mean(results_cat$net_revenue_10yr[results_cat$net_revenue_10yr < VaR_95_rev_l])
+
+VaR_99_rev_l <- quantile(results_cat$net_revenue_10yr, probs = 1 - alpha_99)
+TVaR_99_rev_l <- mean(results_cat$net_revenue_10yr[results_cat$net_revenue_10yr < VaR_99_rev_l])
+
+# Table Format
+short_term_table_cat <- data.frame(
+  Claims = c(exp_claims_s, var_claims_s,
+             VaR_95_claims_s, TVaR_95_claims_s,
+             VaR_99_claims_s, TVaR_99_claims_s),
+  
+  Premium = c(exp_prem_s, var_prem_s,
+              VaR_95_prem_s, TVaR_95_prem_s,
+              VaR_99_prem_s, TVaR_99_prem_s),
+  
+  Net_Revenue = c(exp_rev_s, var_rev_s,
+                  VaR_95_rev_s, TVaR_95_rev_s,
+                  VaR_99_rev_s, TVaR_99_rev_s)
+)
+
+rownames(short_term_table_cat) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+long_term_table_cat <- data.frame(
+  Claims = c(exp_claims_l, var_claims_l,
+             VaR_95_claims_l, TVaR_95_claims_l,
+             VaR_99_claims_l, TVaR_99_claims_l),
+  
+  Premium = c(exp_prem_l, var_prem_l,
+              VaR_95_prem_l, TVaR_95_prem_l,
+              VaR_99_prem_l, TVaR_99_prem_l),
+  
+  Net_Revenue = c(exp_rev_l, var_rev_l,
+                  VaR_95_rev_l, TVaR_95_rev_l,
+                  VaR_99_rev_l, TVaR_99_rev_l)
+)
+
+rownames(long_term_table_cat) <- c(
+  "Expected Value",
+  "Variance",
+  "VaR 95%",
+  "TVaR 95%",
+  "VaR 99%",
+  "TVaR 99%"
+)
+
+short_term_table_cat
+long_term_table_cat
+
+write.xlsx(results_cat, "monte_carlo_cat.xlsx")
+write.xlsx(short_term_table_cat, "short_term_cat.xlsx")
+write.xlsx(long_term_table_cat, "long_term_cat.xlsx")
+
+# Extra Plots ----------------------------------
+# Exposure vs Claim Amount Full
+plot(clms_cargo_sev$exposure, 
+     clms_cargo_sev$claim_amount / 1e9,
+     main = "Cargo Loss Exposure against Claim Amount",
+     xlab = "Exposure",
+     ylab = "Claim Amount (Billions)")
+
+# Exposure vs Claim Zoom
+plot(clms_cargo_sev$exposure[clms_cargo_sev$exposure < 0.3], 
+     clms_cargo_sev$claim_amount[clms_cargo_sev$exposure < 0.3] / 1e9,
+     main = "Cargo Loss Exposure against Claim Amount",
+     xlab = "Exposure",
+     ylab = "Claim Amount (Billions)")
+
+# Route Risks
+plot(clms_cargo_freq$route_risk,
+     main = "Distribution of Route Risks",
+     xlab = "Route Risk",
+     ylab = "Frequency")
